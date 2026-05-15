@@ -1,0 +1,210 @@
+{
+  "skill_name": "vhdl-to-sv",
+  "evals": [
+    {
+      "id": 0,
+      "prompt": "Read `evals/cases/cnt.vhd` and convert it to a sibling SystemVerilog file. Preserve reset polarity, parameter width, and integer range behavior. Return the generated file path plus conversion notes, manual review items, synthesizability checklist, and validation results.",
+      "expected_output": "Creates a `.sv` file containing a SystemVerilog module using typed WIDTH parameter, async active-low reset, always_ff, unsigned packed register, explicit typed ports, q assignment, notes about declaration initialization and signedness/width, and validation results.",
+      "files": ["evals/cases/cnt.vhd"],
+      "must_have": [
+        "module\\s+cnt\\b",
+        "parameter\\s+int\\s+unsigned\\s+WIDTH",
+        "always_ff",
+        "negedge\\s+rst_n",
+        "output\\s+logic\\s*\\[\\s*WIDTH\\s*-\\s*1\\s*:\\s*0\\s*\\]\\s+q",
+        "Validation Results"
+      ],
+      "must_not_have": [
+        "\\binitial\\b",
+        "\\bwait\\b",
+        "\\[[ \\t]*\\][ \\t]*;"
+      ],
+      "manual_review_expected": true
+    },
+    {
+      "id": 1,
+      "prompt": "Read `evals/cases/comb.vhd` and convert it to SystemVerilog files. Pay special attention to enum width, record/struct packing, array dimensions, and others assignments. Return generated file paths, notes, manual review items, synthesizability checklist, and validation results.",
+      "expected_output": "Creates `.sv` file(s) containing an SV package and module using typedef enum logic [1:0], packed lane struct, unpacked lane array, explicit typed ports, always_comb with default y assignment, default case, explicit 8'hFF literal, and validation results.",
+      "files": ["evals/cases/comb.vhd"],
+      "must_have": [
+        "package\\s+p\\b|package\\s+p_pkg\\b",
+        "typedef\\s+enum\\s+logic\\s*\\[\\s*1\\s*:\\s*0\\s*\\]",
+        "typedef\\s+struct\\s+packed",
+        "lane_t\\s+\\w+\\s*\\[\\s*0\\s*:\\s*3\\s*\\]",
+        "always_comb",
+        "default\\s*:",
+        "8'hFF",
+        "Validation Results"
+      ],
+      "must_not_have": [
+        "\\[[ \\t]*\\][ \\t]*;",
+        "\\binitial\\b"
+      ],
+      "manual_review_expected": false
+    },
+    {
+      "id": 2,
+      "prompt": "Read `evals/cases/arith.vhd` and convert it to a SystemVerilog file. Explain in the response how you handled resize, zero extension, sign extension, and concatenation. If anything is ambiguous, list it under manual review. Include validation results.",
+      "expected_output": "Creates a `.sv` file with declarations and assignments that use explicit zero extension for a, sign extension for b, concatenation with 3'b001, notes that resize is not merely $signed/$unsigned, and validation results.",
+      "files": ["evals/cases/arith.vhd"],
+      "must_have": [
+        "module\\s+arith\\b",
+        "\\{\\s*8'b0\\s*,\\s*a\\s*\\}",
+        "\\{\\s*\\{\\s*8\\s*\\{\\s*b\\[\\s*7\\s*\\]\\s*\\}\\s*\\}\\s*,\\s*b\\s*\\}",
+        "\\{\\s*3'b001\\s*,\\s*a\\s*\\}",
+        "resize|zero extension|sign extension",
+        "Validation Results"
+      ],
+      "must_not_have": [
+        "assign\\s+yu\\s*=\\s*\\$unsigned\\s*\\(\\s*a\\s*\\)",
+        "assign\\s+ys\\s*=\\s*\\$signed\\s*\\(\\s*b\\s*\\)"
+      ],
+      "manual_review_expected": false
+    },
+    {
+      "id": 3,
+      "prompt": "Read `evals/cases/conv_pkg.vhd` and convert it to a SystemVerilog package file. Use the preferred project strategy for dynamic-width functions and explain why. Include validation results.",
+      "expected_output": "Creates a `.sv` package file using a parameterized virtual class with static function automatic as the preferred strategy, passes IN_W and OUT_W as parameters or uses $bits at call sites, avoids unsized dynamic arrays and unsized width-sensitive arithmetic, preserves zero-extension behavior, and mentions module-parameterized or fixed package specializations only as fallback strategies.",
+      "files": ["evals/cases/conv_pkg.vhd"],
+      "must_have": [
+        "virtual\\s+class\\s+\\w+",
+        "static\\s+function\\s+automatic",
+        "parameter\\s+int\\s+IN_W",
+        "parameter\\s+int\\s+OUT_W",
+        "Strategy 1|virtual class",
+        "Validation Results"
+      ],
+      "must_not_have": [
+        "\\[[ \\t]*\\][ \\t]*;",
+        "function\\s+automatic\\s+logic\\s*\\[\\s*\\]"
+      ],
+      "manual_review_expected": true
+    },
+    {
+      "id": 4,
+      "prompt": "Read `evals/cases/module_dyn_fn.vhd` and convert it to a sibling SystemVerilog file. Use the module-local dynamic-width function strategy instead of a package utility because the function depends on module generics and is used only in that module. Include validation results.",
+      "expected_output": "Creates a `.sv` module with typed IN_W/OUT_W parameters, a local automatic function or equivalent always_comb/assign logic using module parameters for widths, explicit zero-extension, no package-level utility, and notes that the function is now module-local and not externally reusable.",
+      "files": ["evals/cases/module_dyn_fn.vhd"],
+      "must_have": [
+        "module\\s+module_dyn_fn\\b",
+        "parameter\\s+int\\s+unsigned\\s+IN_W",
+        "parameter\\s+int\\s+unsigned\\s+OUT_W",
+        "function\\s+automatic|always_comb|assign",
+        "module-local|module local|Strategy 2",
+        "Validation Results"
+      ],
+      "must_not_have": [
+        "virtual\\s+class",
+        "package\\s+\\w+",
+        "\\[[ \\t]*\\][ \\t]*;"
+      ],
+      "manual_review_expected": true
+    },
+    {
+      "id": 5,
+      "prompt": "Read `evals/cases/pkg_fixed_width_fn.vhd` and convert it to a SystemVerilog package using fixed-width package specializations for 8-to-16 and 16-to-32 zero-extension. Explain the covered widths and uncovered-call risk. Include validation results.",
+      "expected_output": "Creates a `.sv` package with deterministic fixed-width functions such as zext8_to16 and zext16_to32, explicit zero-extension logic, no unsized dynamic-width function, and manual review notes listing covered and uncovered width combinations.",
+      "files": ["evals/cases/pkg_fixed_width_fn.vhd"],
+      "must_have": [
+        "package\\s+pkg_fixed_width_fn|package\\s+\\w+",
+        "function\\s+automatic\\s+logic\\s*\\[\\s*15\\s*:\\s*0\\s*\\]\\s+zext8_to16",
+        "function\\s+automatic\\s+logic\\s*\\[\\s*31\\s*:\\s*0\\s*\\]\\s+zext16_to32",
+        "\\{\\s*8'b0\\s*,\\s*\\w+\\s*\\}",
+        "covered|uncovered|Strategy 3",
+        "Validation Results"
+      ],
+      "must_not_have": [
+        "virtual\\s+class",
+        "\\[[ \\t]*\\][ \\t]*;"
+      ],
+      "manual_review_expected": true
+    },
+    {
+      "id": 6,
+      "prompt": "Read `evals/cases/attr_range.vhd` and convert it to SystemVerilog. Preserve the `0 to 7` direction or document any complete remapping. Do not mechanically replace VHDL attributes without proving the index semantics. Include validation results.",
+      "expected_output": "Creates an SV module that preserves or explicitly remaps [0:7], uses explicit index/query semantics for left/right, documents attribute handling, and includes validation results.",
+      "files": ["evals/cases/attr_range.vhd"],
+      "must_have": [
+        "module\\s+attr_range\\b",
+        "\\[\\s*0\\s*:\\s*7\\s*\\]|attribute|left|right",
+        "Validation Results"
+      ],
+      "must_not_have": [
+        "assign\\s+first\\s*=\\s*\\$left\\s*\\(",
+        "assign\\s+last\\s*=\\s*\\$right\\s*\\("
+      ],
+      "manual_review_expected": true
+    },
+    {
+      "id": 7,
+      "prompt": "Read `evals/cases/bad_nonsynth.vhd`. Do not blindly convert it to RTL. Return an unsupported/non-synthesizable report with manual review items and validation results.",
+      "expected_output": "Does not produce synthesizable RTL as if valid; flags file I/O, textio, wait-based behavior, and testbench-only/non-synthesizable architecture under manual review or rejection.",
+      "files": ["evals/cases/bad_nonsynth.vhd"],
+      "must_have": [
+        "file|textio|wait|non-synthesizable|unsupported",
+        "Manual Review Items",
+        "Validation Results"
+      ],
+      "must_not_have": [
+        "\\binitial\\b",
+        "\\$fopen",
+        "\\#\\s*10"
+      ],
+      "manual_review_expected": true
+    },
+    {
+      "id": 8,
+      "prompt": "Read `evals/cases/inout_buffer.vhd` and review or convert it conservatively. Do not silently flatten buffer/inout/tri-state behavior. Include manual review items and validation results.",
+      "expected_output": "Flags inout, buffer readback, tri-state Z behavior, and likely multiple-driver semantics; any generated SV uses explicit inout/tri-state handling or requests manual confirmation.",
+      "files": ["evals/cases/inout_buffer.vhd"],
+      "must_have": [
+        "inout|buffer|tri-state|Manual Review Items",
+        "Validation Results"
+      ],
+      "must_not_have": [
+        "assign\\s+q\\s*=\\s*io\\s*;\\s*$"
+      ],
+      "manual_review_expected": true
+    },
+    {
+      "id": 9,
+      "prompt": "Read `evals/cases/procedure_comb.vhd` and convert it to SystemVerilog. Do not generate an SV task. Convert the VHDL procedure to inline combinational logic or a zero-time function/function void, and document the procedure strategy with a Chinese VHDL2SV comment and Conversion Notes.",
+      "expected_output": "Creates a synthesizable SV module without task, using always_comb plus inline logic or function automatic/function automatic void for the procedure behavior. Notes why task was not used and includes validation results.",
+      "files": ["evals/cases/procedure_comb.vhd"],
+      "must_have": [
+        "module\\s+procedure_comb\\b",
+        "always_comb|function\\s+automatic",
+        "VHDL2SV:.*procedure|VHDL2SV:.*过程|procedure.*function|procedure.*inline|procedure.*内联",
+        "Validation Results"
+      ],
+      "must_not_have": [
+        "\\btask\\s+automatic\\b",
+        "\\btask\\s+[A-Za-z_][A-Za-z0-9_]*\\b",
+        "\\binitial\\b",
+        "\\bwait\\b"
+      ],
+      "manual_review_expected": true
+    },
+    {
+      "id": 10,
+      "prompt": "Read `evals/cases/constrained_shift.vhd` and convert it to SystemVerilog. Preserve the constrained integer array width with explicit logic/logic signed instead of SV int storage, convert VHDL shift_left/shift_right to SV shift operators with correct signedness/fill semantics, and add Chinese VHDL2SV comments for both high-risk mappings.",
+      "expected_output": "Creates a package/module conversion where the constrained integer array element uses a derived fixed-width signed logic typedef, not int storage; shift_left maps to << and signed shift_right maps to an arithmetic right shift with explicit signedness; Conversion Notes and Validation Results document the decisions.",
+      "files": ["evals/cases/constrained_shift.vhd"],
+      "must_have": [
+        "typedef\\s+logic\\s+signed\\s*\\[",
+        "VHDL2SV:.*integer range|VHDL2SV:.*整数范围",
+        "<<",
+        ">>>|\\$signed",
+        "VHDL2SV:.*shift|VHDL2SV:.*移位",
+        "Validation Results"
+      ],
+      "must_not_have": [
+        "typedef\\s+int(?:\\s+(?:signed|unsigned))?\\s+\\w+\\s*\\[",
+        "\\bshift_left\\s*\\(",
+        "\\bshift_right\\s*\\(",
+        "\\[[ \\t]*\\][ \\t]*;"
+      ],
+      "manual_review_expected": true
+    }
+  ]
+}

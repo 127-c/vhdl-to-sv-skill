@@ -1,0 +1,4 @@
+interface:
+  display_name: "VHDL to SV"
+  short_description: "Convert synthesizable VHDL RTL into SystemVerilog"
+  default_prompt: "Use $vhdl-to-sv to convert this synthesizable VHDL RTL to equivalent SystemVerilog and list migration notes."
