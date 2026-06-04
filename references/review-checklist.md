@@ -27,6 +27,7 @@ Use this checklist before returning converted SystemVerilog.
 - No ambiguous `buffer`, `linkage`, `inout`, multi-driver, tri-state, or resolved-type behavior is hidden.
 - No clock/reset or declaration initialization assumption is presented as certain unless proven from context.
 - Generate constructs use elaboration-time `generate`, `genvar`, and parameters rather than procedural runtime logic.
+- No Xilinx UNISIM or other vendor-specific primitives (LUT*, SRL16E, FD*, MUXCY, XORCY, MULT_AND, CARRY*, DSP48*, BUFG, RAMB*, etc.) remain in generated SV unless the user explicitly requested vendor-specific output. Each removed primitive has a corresponding generic logic replacement with a `// VHDL2SV:` comment.
 
 ## Output Checks
 

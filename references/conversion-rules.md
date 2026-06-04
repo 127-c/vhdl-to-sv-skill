@@ -303,10 +303,78 @@ See `special-conversion-strategies.md` for the decision workflow and expanded pa
 | OP-004 | P1 | `to_integer(unsigned(a))` | `int'($unsigned(a))` | Review target width. `int` is fixed-width and may truncate large vectors. |
 | OP-005 | P1 | `to_unsigned(i,N)`, `to_signed(i,N)` | sized cast | Preserve target width `N` explicitly. |
 
+## Vendor/UNISIM Primitive Substitution
+
+When the target is a non-Xilinx platform, or the user requests generic synthesizable output, every Xilinx UNISIM primitive must be replaced with an equivalent generic SystemVerilog implementation. Each substitution must include a `// VHDL2SV:` Chinese comment identifying the original primitive.
+
+### Combinational Primitives
+
+| ID | Priority | VHDL Primitive | Generic SV Equivalent |
+| --- | --- | --- | --- |
+| VP-001 | P0 | `LUT1` (2-entry LUT) | `always_comb case({i0}) ...` or `assign o = lut_val[{i0}];` |
+| VP-002 | P0 | `LUT2` (4-entry LUT) | `always_comb case({i1,i0}) ...` or `assign o = lut_val[{i1,i0}];` |
+| VP-003 | P0 | `LUT3` (8-entry LUT) | `always_comb case({i2,i1,i0}) ...` or `assign o = lut_val[{i2,i1,i0}];` |
+| VP-004 | P0 | `LUT4` (16-entry LUT) | `always_comb case({i3,i2,i1,i0}) ...` or `assign o = lut_val[{i3,i2,i1,i0}];` |
+| VP-005 | P0 | `LUT5`/`LUT6` | Same pattern as LUT4, extended to 5 or 6 inputs |
+| VP-006 | P0 | `MUXCY` (carry mux) | `assign o = s ? ci : di;` |
+| VP-007 | P0 | `XORCY` (carry xor) | `assign o = ci ^ li;` |
+| VP-008 | P0 | `MULT_AND` | `assign lo = a & b;` |
+| VP-009 | P0 | `MUXF5`/`MUXF6`/`MUXF7`/`MUXF8` | `assign o = s ? i1 : i0;` |
+
+### Sequential Primitives
+
+| ID | Priority | VHDL Primitive | Generic SV Equivalent |
+| --- | --- | --- | --- |
+| VP-010 | P0 | `FD` (D flip-flop) | `always_ff @(posedge C) Q <= D;` |
+| VP-011 | P0 | `FDE` (D flip-flop w/ CE) | `always_ff @(posedge C) if(CE) Q <= D;` |
+| VP-012 | P0 | `FDRE` (D flip-flop w/ sync reset) | `always_ff @(posedge C) if(R) Q <= 0; else if(CE) Q <= D;` (check reset polarity from generic) |
+| VP-013 | P0 | `FDSE` (D flip-flop w/ sync set) | `always_ff @(posedge C) if(S) Q <= 1; else if(CE) Q <= D;` |
+| VP-014 | P0 | `FDRSE` (D flip-flop w/ reset+set) | `always_ff @(posedge C) if(R) Q <= 0; else if(S) Q <= 1; else if(CE) Q <= D;` |
+| VP-015 | P0 | `FDCP`/`FDCPE` (async clear/preset) | `always_ff @(posedge C or posedge CLR or posedge PRE) ...` — flag for review: async control behavior must match original |
+| VP-016 | P0 | `SRL16E` (16-bit shift register) | `always_ff @(posedge CLK) begin sr <= {sr[14:0], D}; end` + `assign Q = CE ? sr[A] : Q;` (check CE polarity from generic) |
+| VP-017 | P0 | `SRLC32E`/`SRLC16E` | Same pattern as SRL16E extended to required depth |
+
+### Carry Chain and Arithmetic Primitives
+
+| ID | Priority | VHDL Primitive | Generic SV Equivalent |
+| --- | --- | --- | --- |
+| VP-020 | P0 | `CARRY4` | Behavioral: `assign {CO[3:0], O[3:0]} = {4'b0, S[3:0]} + {CYINIT, DI[2:0], CI};` — or manually expand the carry chain per-bit |
+| VP-021 | P0 | `DSP48E1` | Parameterized behavioral: `P <= (A*B + C) or behavioral model with pipeline stages` — detailed DSP48 conversion is complex; when the full DSP48 feature set (pre-adder, cascade, pattern detect) is used, flag as Manual Review Item |
+| VP-022 | P0 | `DSP48E2` | Same as DSP48E1 with wider buses |
+
+### Clock and I/O Primitives
+
+| ID | Priority | VHDL Primitive | Generic SV Equivalent |
+| --- | --- | --- | --- |
+| VP-030 | P0 | `BUFG` (global clock buffer) | `assign O = I;` — passthrough; clock routing is handled by the synthesis tool |
+| VP-031 | P0 | `BUFH`/`BUFR`/`BUFIO` | `assign O = I;` — same passthrough |
+| VP-032 | P0 | `IBUF`/`OBUF` | `assign O = I;` — passthrough |
+| VP-033 | P0 | `IOBUF` (tri-state I/O) | `assign O = T ? 1'bz : I; assign IO = T ? 1'bz : I;` — flag for review, I/O buffer behavior depends on target technology |
+| VP-034 | P0 | `MMCME2_ADV`/`PLLE2_ADV` | Flag as Manual Review Item — clock management tiles are inherently vendor-specific and cannot be trivially replaced |
+
+### Block RAM Primitives
+
+| ID | Priority | VHDL Primitive | Generic SV Equivalent |
+| --- | --- | --- | --- |
+| VP-040 | P0 | `RAMB18E1`/`RAMB36E1` (simple read/write) | Infer as generic RAM: `logic [W-1:0] mem [0:DEPTH-1]; always_ff @(posedge CLK) if(WE) mem[ADDR] <= DI; assign DO = mem[ADDR];` — but flag complex configurations (ECC, FIFO mode, cascade) as Manual Review Item |
+| VP-041 | P0 | `RAMB18E1`/`RAMB36E1` (complex config) | Flag as Manual Review Item with the specific mode and port configuration |
+
+### Substitution Rules
+
+- **P0 rules**: Apply unconditionally for generic/non-Xilinx target. Do not instantiate the original primitive.
+- **P1 rules**: Apply by default; only keep the original primitive if the user explicitly requests Xilinx-specific output.
+- Every substitution must add a `// VHDL2SV:` comment next to the converted code: `// VHDL2SV: 原 Xilinx <primitive_name> 原语替换为通用逻辑`
+- For LUTs with init values, embed the init value as a localparam and use it in the case statement or indexed select.
+- For SRL16E, port `A[3:0]` selects which tap of the 16-element shift register is output; model this as a shift register with an addressable output.
+- For DSP48 and complex BRAM, prefer behavioral descriptions (`a*b + c` for simple multiply-add) over trying to replicate every pipeline register exactly. Flag complex usage for manual review.
+- Clock buffer (BUFG/BUFH/BUFR) passthrough: these are routing hints for the synthesis tool; a simple wire assignment is functionally correct for simulation and most synthesis tools will re-infer the appropriate clock resources.
+- Do NOT emit `library UNISIM;` or `import unisim::*;` in generated SV.
+
 ## Final Conversion Checks
 
 | ID | Priority | Check | Rule |
 | --- | --- | --- | --- |
 | C-001 | P0 | width and signedness | Recheck every assignment, arithmetic expression, comparison, shift, resize/ext/sxt, and cast. |
-| C-002 | P0 | synthesizability | No dynamic arrays, unbounded loops, wait/file/access/protected constructs, accidental latches, or multiple drivers unless intentionally reviewed. |
+| C-002 | P0 | synthesizability | No dynamic arrays, unbounded loops, wait/file/access/protected constructs, accidental latches, or multiple drivers unless intentionally reviewed. Also: no vendor-specific primitives (UNISIM, ALTPRIM, etc.) unless the user explicitly requested vendor-specific output. |
 | C-003 | P0 | response format | Return converted SV, key mapping notes, risks/manual confirmations, and a synthesizability checklist. |
+| C-004 | P0 | vendor primitives | All Xilinx UNISIM (LUT*, SRL16E, FD*, MUXCY, XORCY, MULT_AND, CARRY*, DSP48*, BUFG, RAMB*, etc.) have been replaced with generic synthesizable equivalents. |

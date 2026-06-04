@@ -23,6 +23,7 @@ Handle:
 - `port`, `signal`, `variable`, `subtype`, `type`, `enum`, `record`, and arrays
 - concurrent assignments, combinational processes, clocked processes, functions, procedures, packages, and generate blocks
 - VHDL bit/vector literals, concatenation, indexing, slices, attributes, signed/unsigned arithmetic, `resize`, `ext`, and `sxt`
+- **Vendor/UNISIM primitive substitution**: Convert Xilinx UNISIM primitives (LUT1-6, SRL16E, FD/FDE/FDRE/FDSE, MUXCY, XORCY, MULT_AND, CARRY4, DSP48E1/E2, BUFG, RAMB*, etc.) into generic synthesizable SystemVerilog equivalents. Do NOT instantiate vendor primitives in generated SV output unless the user explicitly requests Xilinx-specific output.
 
 Flag rather than blindly convert:
 - `access`, `file`, `protected`, `physical`, most `real`/`time` RTL usages, dynamic allocation, text I/O, wait-based behavioral code, or testbench-only constructs
@@ -49,6 +50,7 @@ Follow these phases in order. Keep notes about assumptions, unsupported construc
 2. Classify each input as VHDL source, converted SV source, package, package body, entity, architecture, standalone function/procedure, or review-only artifact.
 3. Identify whether the user wants file output, inline code, a review, or an explanation.
 4. Decide output paths before conversion. By default, write each converted design unit to a sibling `.sv` file with the same base name, or to a user-specified output directory if provided. For packages, use `<package_name>_pkg.sv` when that is clearer than the source filename.
+5. **检测供应商原语**: 扫描源文件中的 `library unisim;`、`library UNISIM;`、`use unisim.vcomponents.all;` 和供应商专用组件实例化（LUT*、SRL16E、FD*、MUXCY、XORCY、MULT_AND、CARRY*、DSP48*、BUFG、RAMB* 等）。标记这些需要进行通用逻辑转换。如果用户的目标平台不是 Xilinx，所有供应商原语必须替换为通用可综合等价实现。
 
 ### Phase 1: 涓婁笅鏂囧垎鏋?/ Context Analysis
 
@@ -67,6 +69,7 @@ Follow these phases in order. Keep notes about assumptions, unsupported construc
 5. Choose conversion strategies by behavior, not by syntax. Preserve source semantics before making style improvements.
 6. Apply the dynamic-width function rule when required: prefer the parameterized `virtual class` plus `static function automatic` strategy; use module-parameterized or fixed-width package-specialization strategies only under the documented conditions.
 7. Emit a manual-review item instead of guessing when semantics depend on target tool support, project coding style, reset convention, resolved logic behavior, or ambiguous VHDL constructs.
+8. **Apply vendor primitive substitution**: When converting VHDL that instantiates Xilinx UNISIM or other vendor-specific primitives, replace each primitive with its generic synthesizable SystemVerilog equivalent per `references/conversion-rules.md` section "Vendor/UNISIM Primitive Substitution". Add a `// VHDL2SV:` comment marking the substitution. If a primitive cannot be cleanly replaced, flag it as a Manual Review Item.
 
 ### Phase 3: 缁撴灉鐢熸垚 / Result Generation
 
@@ -134,6 +137,33 @@ Prefer the smallest SystemVerilog that preserves behavior. Do not over-modernize
 - Add a short Chinese `// VHDL2SV:` comment next to every constrained VHDL integer/subtype converted to a fixed-width `logic` type, including the original VHDL prototype or range summary.
 - Add a short Chinese `// VHDL2SV:` comment next to every non-trivial VHDL shift-function/operator conversion when signedness, fill behavior, or result width matters.
 
+### 渚涘簲鍟嗗師璇浆鎹?/ Vendor Primitive Substitution
+
+When the target is a non-Xilinx platform or the user requests generic synthesizable output, every Xilinx UNISIM primitive instantiation must be converted to an equivalent generic SystemVerilog implementation. See `references/conversion-rules.md` for detailed rules.
+
+Key substitution rules:
+
+| Xilinx Primitive | Generic SV Equivalent |
+|:---|:---|
+| `LUT1`/`LUT2`/`LUT3`/`LUT4`/`LUT5`/`LUT6` | `always_comb` case statement using the LUT init value as a truth table |
+| `SRL16E` | `always_ff @(posedge clk)` shift register with addressable output |
+| `FD`/`FDE`/`FDRE`/`FDSE`/`FDRSE` | `always_ff @(posedge clk)` with appropriate reset/enable |
+| `MUXCY` | `assign o = s ? ci : di;` (carry-chain mux) |
+| `XORCY` | `assign o = a ^ b;` |
+| `MULT_AND` | `assign o = a & b;` |
+| `CARRY4` | Behavioral carry chain or `assign {co, o} = a + b + ci;` |
+| `DSP48E1`/`DSP48E2` | Parameterized multiplier+adder module or behavioral `a*b + c` |
+| `BUFG`/`BUFH` | `assign o = i;` (clock buffer passthrough) |
+| `RAMB18E1`/`RAMB36E1` | Generic inferred BRAM with `always_ff` read/write |
+| `IBUF`/`OBUF`/`IOBUF` | `assign` passthrough or tri-state buffer |
+
+Rules:
+- Do NOT instantiate UNISIM primitives in generated SV output.
+- Do NOT emit `library unisim;` or `import unisim::*;` in generated SV.
+- Each substitution must include a `// VHDL2SV:` Chinese comment identifying the original primitive.
+- For complex primitives (DSP48, block RAM), use behavioral descriptions that inference tools can recognize.
+- Flag any primitive that cannot be cleanly converted as a Manual Review Item.
+
 Procedure rules:
 - Do not generate SV `task` for synthesizable RTL by default.
 - Convert synthesizable VHDL `procedure` to `function automatic` when it is pure zero-time combinational logic. Use an explicit return type for one result, or `function automatic void` with `output` / `inout` arguments for multiple results when that is clearer than a struct return.
@@ -168,6 +198,7 @@ Validation rules:
 - Do not leave VHDL `shift_left` / `shift_right` as function calls in generated SV unless a project-defined SV helper function with that exact contract is intentionally generated and documented.
 - Do not introduce SV dynamic arrays, queues, stateful classes, timing controls, file I/O, or other unsynthesizable constructs for RTL migration.
 - Do not generate SV `task` for RTL procedure conversion by default.
+- Do not instantiate Xilinx UNISIM, Altera ALTPRIM, Lattice, or any vendor-specific primitives in generated SV output unless the user explicitly requests vendor-specific output. Replace them with generic synthesizable logic.
 - Do not use positional associations when named parameter or port connections are possible.
 - Do not emit `input var`, `output var`, or `inout var` on synthesizable module ports. Treat simulator warnings about defaulting user-defined typed inputs to `var` as a compatibility note, not as permission to add `var`; prefer plain typed ports or explicit flattening/wrappers.
 - Do not clutter generated RTL with obvious comments. Use Chinese `// VHDL2SV:` comments only for high-risk migration decisions; put broader assumptions and risks in the response notes.
