@@ -14,6 +14,7 @@ This reference summarizes the project rules for synthesizable VHDL-to-SystemVeri
 | T-006 | P0 | `subtype idx_t is integer range 0 to 15` | `typedef logic [3:0] idx_t` | Preserve range information when the subtype represents hardware bits, counters, indexes, array elements, record fields, ports, or pipeline state. |
 | T-009 | P0 | `integer range -2**N to 2**N-1` | `logic signed [N:0]` or named typedef | This is an exact two's-complement signed range using `N+1` bits. Do not map storage of this type to 32-bit `int` unless explicitly reviewed. Add a `VHDL2SV:` comment with the original range. |
 | T-007 | P1 | VHDL enum | `typedef enum logic[...]` | Infer explicit enum width from state count. Avoid tool-dependent implicit enum sizes. |
+| T-007a | P0 | Assign `int`/`localparam` to enum-typed variable | `enum_var = enum_type'(value)` | **必须显式类型转换。** QuestaSim 允许 `int` 隐式赋给枚举变量，但综合工具 (Vivado, DC, Precision) 严格禁止。任何将 `int`、`integer`、`localparam int` 赋给 `enum` 类型变量的地方，都必须加 `enum_type'()` 强制转换。VHDL 中 `variable := integer_value` 赋给枚举类型是合法的，但 SV 中不允许跨类型赋值，SV 枚举是强类型。 |
 | T-008 | P2 | `character`, `string` | `byte`, `string`, byte array, or fixed logic vector | Decide whether the string is text metadata, a fixed indexed array, or synthesizable data. |
 
 ## Declaration Mapping
@@ -75,7 +76,7 @@ typedef target_scale_t intarray [number_of_denormalizer_pipeline_stages:0];
 | ID | Priority | VHDL | SystemVerilog | Rule |
 | --- | --- | --- | --- | --- |
 | ARR-001 | P1 | constrained array of vector | unpacked array with packed element | Keep element width and array dimension separate: `logic [7:0] arr [0:3]`. |
-| ARR-002 | P0 | unconstrained array | object-level fixed array or parameterized bound | Do not translate RTL unconstrained arrays to SV dynamic arrays. Find actual bounds at use sites. |
+| ARR-002 | P0 | unconstrained array | object-level fixed array or parameterized bound | **严禁转换为 SV 动态数组。** 综合工具 (Vivado, DC, Precision) 不支持动态数组综合。特别是 VHDL 函数参数 `arr : array_of_type` (无约束) 不能直接转为 SV `input type arr[]` (动态数组)。必须找到实际调用处的边界，改为固定宽度：`input logic [199:0] arr` 或使用参数化 `parameter int N, input logic [N-1:0] arr`。 |
 | ARR-003 | P1 | generic-sized array | parameter plus fixed unpacked array | Preserve `DEPTH`/`WIDTH` parameters and consider adding validity checks. |
 | ARR-004 | P1 | array port | unpacked array port or flattened bus | Choose based on project/tool interface rules. If flattening, provide pack/unpack mapping. |
 | ARR-005 | P1 | multidimensional array | packed/unpacked dimensions by intent | Decide whether the object is memory-like storage or a packed bus/lane structure. |
@@ -108,7 +109,7 @@ typedef target_scale_t intarray [number_of_denormalizer_pipeline_stages:0];
 | F-004 | P1 | `constant`/`variable`/`signal` parameters | `input`, `output`, `inout`, `ref` | Infer direction from read/write behavior, not keyword replacement. |
 | F-005 | P1 | `package` / `package body` | `package ... endpackage` | Usually merge declarations and bodies into one SV package. |
 | F-006 | P2 | `library` / `use` | `import pkg::*` | Convert user packages. Standard IEEE imports usually disappear after type conversion. |
-| G-001 | P1 | generic-derived constant | `localparam` | Use `$clog2` carefully and review edge cases like `DEPTH == 1`. |
+| G-001 | P1 | generic-derived constant | `localparam` | Use `$clog2` carefully. When `DEPTH == 1`, `$clog2(1)` returns 0, which creates zero-width vectors. Always guard with: `localparam int unsigned ADDR_W = (DEPTH > 1) ? $clog2(DEPTH) : 1;` |
 | G-002 | P1 | `for generate` | `genvar` and `generate for` | This is elaboration-time structure, not procedural runtime looping. |
 | G-003 | P1 | `if generate` | `generate if` | Preserve generate labels where useful. |
 
@@ -292,6 +293,81 @@ See `special-conversion-strategies.md` for the decision workflow and expanded pa
 - H-003 range-unconstrained arrays.
 - H-004 `'length`, `'range`, `'left`, and `'right` attributes.
 
+## 位宽管理 / Width Management (P0)
+
+**这是 VHDL→SV 转换中最高频的综合错误来源。** VHDL 的隐式宽度处理在 SV 中全部必须显式化。
+
+### 核心差异
+
+| 场景 | VHDL | SV 直接翻译 | 问题 | 正确做法 |
+|------|------|-----------|------|---------|
+| 赋值给更宽目标 | `a <= b;` (隐式零扩展) | `assign a = b;` | 若 `a` 比 `b` 宽，高位未定义 | `assign a = {{(W1-W2){1'b0}}, b};` |
+| 移位后位选 | `x(a'left downto 0)` 自动适配 | `x[W-1:0]` | 移位结果宽度 = 被移位数宽度，取更多位会越界 | 内部数据路径宽度 ≥ 输出所需最大宽度 |
+| `1 << N` | VHDL `1` 是任意精度 | `1 << N` 是 32-bit | `N ≥ 32` 时溢出为 0 | `64'(1) << N` 或 `{N{1'b0}, 1'b1}` |
+| part-select | `v(N-1 downto 0)` 隐式截断 | `v[0 +: N]` | `N > $bits(v)` 时越界 | 确保源向量宽度 ≥ `N`，必要时光扩展 |
+| `&` 掩码比较 | `(x and mask) = 0` 自动对齐 | `x & mask == '0` | `mask` 宽度不匹配时截断 | `mask` 与 `x` 同宽 |
+
+### 规则1: 内部数据路径必须足够宽 (C-002c)
+
+**所有中间信号宽度必须 ≥ 所有从这个信号派生的输出所需宽度。**
+
+```verilog
+// ❌ 错误：shifted 是 27-bit，但输出需要 29-bit
+logic [26:0] shifted;
+assign shifted = data >> dist;
+assign result = shifted[0 +: 29];  // 越界！29 > 27
+
+// ✅ 正确：内部路径用最大宽度
+localparam INT_W = (IN_W > OUT_W) ? IN_W : OUT_W;
+logic [INT_W-1:0] shifted;
+assign shifted = data >> dist;     // 高位自动补零
+assign result = shifted[0 +: OUT_W];
+```
+
+### 规则2: part-select 起始位计算 (C-002e)
+
+```
+从 N-bit 向量取 M 位: vec[N-1 -: M]  →  vec[N-1 : N-M]
+                          vec[N-M +: M]  →  vec[N-M : N-1]
+
+关键: N-1 是最高位索引，M ≤ N 必须成立。
+若 M > N，需先扩展源向量到 M 位。
+```
+
+**典型案例**: `mul_result` 是 47-bit (`[46:0]`)，需取 47 位：
+```verilog
+// ✅ mul_result[46 -: 47] = [46:0] — 正确
+// ❌ mul_result[45 -: 47] = [45:-1] — 越界！
+```
+
+### 规则3: 移位字面量宽度 (C-002d)
+
+```verilog
+// ❌ 1 << 49 → 32-bit 溢出 → 0
+// ✅ 64'(1) << 49 或 65'(1) << 49
+```
+
+### 规则4: VHDL 函数数组参数的宽度固定 (C-002b)
+
+```verilog
+// ❌ VHDL function f(arr : bool_array) 不能转 SV:
+function f(input int arr[]);  // 动态数组，不可综合
+
+// ✅ 找到调用处实际宽度:
+function f(input logic [199:0] arr);  // flt_pt_reg_t = 200-bit
+```
+
+### 检查清单
+
+转换每个模块时自问：
+1. 每个 `logic [N:0]` 信号的 `N+1` 是否 ≥ 所有读取它的位选宽度？
+2. 每个 `assign a = b` 中 `a` 和 `b` 宽度是否相等？不等时是否需要扩展/截断？
+3. 每个 `1 << N` 中 `N` 是否可能 ≥ 32？
+4. 每个 part-select `vec[X -: Y]` 中 `Y ≤ $bits(vec)` 且 `X ≥ Y-1`？
+5. 每个 VHDL 函数参数是否是固定宽度而非动态数组？
+
+---
+
 ## Operators and Casts
 
 | ID | Priority | VHDL | SystemVerilog | Rule |
@@ -305,70 +381,34 @@ See `special-conversion-strategies.md` for the decision workflow and expanded pa
 
 ## Vendor/UNISIM Primitive Substitution
 
-When the target is a non-Xilinx platform, or the user requests generic synthesizable output, every Xilinx UNISIM primitive must be replaced with an equivalent generic SystemVerilog implementation. Each substitution must include a `// VHDL2SV:` Chinese comment identifying the original primitive.
+### 核心原则
 
-### Combinational Primitives
+当目标平台非 Xilinx 或用户要求通用可综合输出时，所有 Xilinx UNISIM 原语必须替换为**功能等价、逻辑时序相同**的通用 SystemVerilog 实现。
 
-| ID | Priority | VHDL Primitive | Generic SV Equivalent |
-| --- | --- | --- | --- |
-| VP-001 | P0 | `LUT1` (2-entry LUT) | `always_comb case({i0}) ...` or `assign o = lut_val[{i0}];` |
-| VP-002 | P0 | `LUT2` (4-entry LUT) | `always_comb case({i1,i0}) ...` or `assign o = lut_val[{i1,i0}];` |
-| VP-003 | P0 | `LUT3` (8-entry LUT) | `always_comb case({i2,i1,i0}) ...` or `assign o = lut_val[{i2,i1,i0}];` |
-| VP-004 | P0 | `LUT4` (16-entry LUT) | `always_comb case({i3,i2,i1,i0}) ...` or `assign o = lut_val[{i3,i2,i1,i0}];` |
-| VP-005 | P0 | `LUT5`/`LUT6` | Same pattern as LUT4, extended to 5 or 6 inputs |
-| VP-006 | P0 | `MUXCY` (carry mux) | `assign o = s ? ci : di;` |
-| VP-007 | P0 | `XORCY` (carry xor) | `assign o = ci ^ li;` |
-| VP-008 | P0 | `MULT_AND` | `assign lo = a & b;` |
-| VP-009 | P0 | `MUXF5`/`MUXF6`/`MUXF7`/`MUXF8` | `assign o = s ? i1 : i0;` |
+**功能等价定义**：
+- 相同输入产生相同输出（bit-exact）
+- 相同的周期精确时序（cycle-accurate latency）
+- 相同的复位/使能行为
+- 综合工具可推断出等价的硬件结构
 
-### Sequential Primitives
+**转换策略**：
 
-| ID | Priority | VHDL Primitive | Generic SV Equivalent |
-| --- | --- | --- | --- |
-| VP-010 | P0 | `FD` (D flip-flop) | `always_ff @(posedge C) Q <= D;` |
-| VP-011 | P0 | `FDE` (D flip-flop w/ CE) | `always_ff @(posedge C) if(CE) Q <= D;` |
-| VP-012 | P0 | `FDRE` (D flip-flop w/ sync reset) | `always_ff @(posedge C) if(R) Q <= 0; else if(CE) Q <= D;` (check reset polarity from generic) |
-| VP-013 | P0 | `FDSE` (D flip-flop w/ sync set) | `always_ff @(posedge C) if(S) Q <= 1; else if(CE) Q <= D;` |
-| VP-014 | P0 | `FDRSE` (D flip-flop w/ reset+set) | `always_ff @(posedge C) if(R) Q <= 0; else if(S) Q <= 1; else if(CE) Q <= D;` |
-| VP-015 | P0 | `FDCP`/`FDCPE` (async clear/preset) | `always_ff @(posedge C or posedge CLR or posedge PRE) ...` — flag for review: async control behavior must match original |
-| VP-016 | P0 | `SRL16E` (16-bit shift register) | `always_ff @(posedge CLK) begin sr <= {sr[14:0], D}; end` + `assign Q = CE ? sr[A] : Q;` (check CE polarity from generic) |
-| VP-017 | P0 | `SRLC32E`/`SRLC16E` | Same pattern as SRL16E extended to required depth |
+1. **LUT 原语** (LUT1-6、MUXF5-8)：替代为 `always_comb` 真值表实现，使用 INIT 值展开。必须是逐 bit 等价的结构级逻辑，不得简化为行为级表达式。
+2. **触发器原语** (FD/FDE/FDRE/FDSE 等)：替代为 `always_ff`，保留原始复位/使能极性和时序。异步控制信号（FDCP）需人工审核确认行为一致。
+3. **移位寄存器原语** (SRL16E/SRLC32E)：替代为等价位宽的 `always_ff` 移位寄存器，A 端口地址选择输出需精确复制。
+4. **进位链原语** (CARRY4、MUXCY、XORCY)：按原始进位链结构逐位还原，保持与原始 VHDL 相同的数据路径宽度和进位传播逻辑。如无法确定结构精度，标志为 Manual Review Item。
+5. **DSP 原语** (DSP48E1/E2)：保留原始流水线级数和乘法/加法行为，不得省略任何流水线寄存器。复杂功能（pre-adder、cascade、pattern detect）标志为 Manual Review Item。
+6. **时钟/IO 缓冲** (BUFG/BUFH/IBUF/OBUF)：替换为直通 assign，综合工具会自动推断目标平台的时钟/IO 资源。IOBUF 三态行为需精确复制，标志 Manual Review Item。
+7. **时钟管理** (MMCM/PLL)：标志为 Manual Review Item——时钟管理 tile 本质上是供应商专有的，无法简单替换。
+8. **Block RAM** (RAMB18E1/RAMB36E1)：保留原始深度/宽度/端口数/读写行为，使用 inferred BRAM 描述。复杂配置（ECC、FIFO、cascade）标志为 Manual Review Item。
 
-### Carry Chain and Arithmetic Primitives
+### 通用规则
 
-| ID | Priority | VHDL Primitive | Generic SV Equivalent |
-| --- | --- | --- | --- |
-| VP-020 | P0 | `CARRY4` | Behavioral: `assign {CO[3:0], O[3:0]} = {4'b0, S[3:0]} + {CYINIT, DI[2:0], CI};` — or manually expand the carry chain per-bit |
-| VP-021 | P0 | `DSP48E1` | Parameterized behavioral: `P <= (A*B + C) or behavioral model with pipeline stages` — detailed DSP48 conversion is complex; when the full DSP48 feature set (pre-adder, cascade, pattern detect) is used, flag as Manual Review Item |
-| VP-022 | P0 | `DSP48E2` | Same as DSP48E1 with wider buses |
-
-### Clock and I/O Primitives
-
-| ID | Priority | VHDL Primitive | Generic SV Equivalent |
-| --- | --- | --- | --- |
-| VP-030 | P0 | `BUFG` (global clock buffer) | `assign O = I;` — passthrough; clock routing is handled by the synthesis tool |
-| VP-031 | P0 | `BUFH`/`BUFR`/`BUFIO` | `assign O = I;` — same passthrough |
-| VP-032 | P0 | `IBUF`/`OBUF` | `assign O = I;` — passthrough |
-| VP-033 | P0 | `IOBUF` (tri-state I/O) | `assign O = T ? 1'bz : I; assign IO = T ? 1'bz : I;` — flag for review, I/O buffer behavior depends on target technology |
-| VP-034 | P0 | `MMCME2_ADV`/`PLLE2_ADV` | Flag as Manual Review Item — clock management tiles are inherently vendor-specific and cannot be trivially replaced |
-
-### Block RAM Primitives
-
-| ID | Priority | VHDL Primitive | Generic SV Equivalent |
-| --- | --- | --- | --- |
-| VP-040 | P0 | `RAMB18E1`/`RAMB36E1` (simple read/write) | Infer as generic RAM: `logic [W-1:0] mem [0:DEPTH-1]; always_ff @(posedge CLK) if(WE) mem[ADDR] <= DI; assign DO = mem[ADDR];` — but flag complex configurations (ECC, FIFO mode, cascade) as Manual Review Item |
-| VP-041 | P0 | `RAMB18E1`/`RAMB36E1` (complex config) | Flag as Manual Review Item with the specific mode and port configuration |
-
-### Substitution Rules
-
-- **P0 rules**: Apply unconditionally for generic/non-Xilinx target. Do not instantiate the original primitive.
-- **P1 rules**: Apply by default; only keep the original primitive if the user explicitly requests Xilinx-specific output.
-- Every substitution must add a `// VHDL2SV:` comment next to the converted code: `// VHDL2SV: 原 Xilinx <primitive_name> 原语替换为通用逻辑`
-- For LUTs with init values, embed the init value as a localparam and use it in the case statement or indexed select.
-- For SRL16E, port `A[3:0]` selects which tap of the 16-element shift register is output; model this as a shift register with an addressable output.
-- For DSP48 and complex BRAM, prefer behavioral descriptions (`a*b + c` for simple multiply-add) over trying to replicate every pipeline register exactly. Flag complex usage for manual review.
-- Clock buffer (BUFG/BUFH/BUFR) passthrough: these are routing hints for the synthesis tool; a simple wire assignment is functionally correct for simulation and most synthesis tools will re-infer the appropriate clock resources.
-- Do NOT emit `library UNISIM;` or `import unisim::*;` in generated SV.
+- 每个替换必须添加 `// VHDL2SV:` 中文注释，标明原始原语名称。
+- 不得在输出中保留 `library UNISIM;` 或 `import unisim::*;`。
+- 不得实例化原始供应商原语。
+- 无法确认功能等价时，标志为 Manual Review Item，不得猜测替换。
+- **本节的替换规则是"严禁行为级简化转换"P0 规则的例外**：本节的 LUT/进位链/DSP 原语替换允许在保证功能等价和时序相同的前提下，生成结构级通用逻辑，不要求逐门复制原始原语的内部 netlist。
 
 ## Final Conversion Checks
 
@@ -376,5 +416,9 @@ When the target is a non-Xilinx platform, or the user requests generic synthesiz
 | --- | --- | --- | --- |
 | C-001 | P0 | width and signedness | Recheck every assignment, arithmetic expression, comparison, shift, resize/ext/sxt, and cast. |
 | C-002 | P0 | synthesizability | No dynamic arrays, unbounded loops, wait/file/access/protected constructs, accidental latches, or multiple drivers unless intentionally reviewed. Also: no vendor-specific primitives (UNISIM, ALTPRIM, etc.) unless the user explicitly requested vendor-specific output. |
+| C-002a | P0 | enum 赋值类型转换 | **枚举必须显式转换。** VHDL 中 `enum_var := 0` 合法，但 SV 枚举是强类型。任何 `int`/`localparam int` 赋值给 `enum` 类型变量时，必须加 `enum_type'(value)` 强制转换。Questasim 允许隐式转换，但 Vivado/DC/Precision 严格禁止。典型案例：`add_stage.round_usage = flt_pt_imp_t'(FLT_PT_NO_USAGE)`。 |
+| C-002b | P0 | 函数参数禁止动态数组 | **VHDL 函数无约束数组参数不能直接转 SV 动态数组。** VHDL `function f(arr : bool_array)` 中 `bool_array` 无约束 → SV 若写成 `input int arr[]` 是动态数组，综合不支持。必须找到调用处的实际宽度，改为固定宽度：`input logic [199:0] arr`。典型案例：`flt_get_delay_between_stages(reg_mask)` 的参数。 |
+| C-002c | P0 | 移位/位选宽度安全 | **行为级移位不自动处理宽度扩展。** VHDL `a >> dist` 结果宽度与 `a` 相同，赋值给更宽的目标时隐式零扩展。SV `a >> dist` 结果宽度等于 `a`，若 `a` 比目标窄，位选 `[0 +: N]` 会越界。**所有内部数据路径宽度必须 ≥ 所有输出所需宽度。** 使用 `INT_WIDTH = max(INPUT_WIDTH, OUTPUT_WIDTH)` 模式。 |
+| C-002d | P0 | 移位字面量宽度 | **`1 << N` 是 32-bit 运算。** Verilog 中无宽度字面量 `1` 是 32-bit。当 `N ≥ 32` 时 `1 << N` 溢出为 0。掩码场景必须用 `64'(1) << N` 或 `{N{1'b0}, 1'b1}` 等宽字面量。同样，`N'(1)` 语法必须带宽度。 |
 | C-003 | P0 | response format | Return converted SV, key mapping notes, risks/manual confirmations, and a synthesizability checklist. |
 | C-004 | P0 | vendor primitives | All Xilinx UNISIM (LUT*, SRL16E, FD*, MUXCY, XORCY, MULT_AND, CARRY*, DSP48*, BUFG, RAMB*, etc.) have been replaced with generic synthesizable equivalents. |

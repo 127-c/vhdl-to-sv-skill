@@ -139,30 +139,15 @@ Prefer the smallest SystemVerilog that preserves behavior. Do not over-modernize
 
 ### 渚涘簲鍟嗗師璇浆鎹?/ Vendor Primitive Substitution
 
-When the target is a non-Xilinx platform or the user requests generic synthesizable output, every Xilinx UNISIM primitive instantiation must be converted to an equivalent generic SystemVerilog implementation. See `references/conversion-rules.md` for detailed rules.
+When the target is a non-Xilinx platform or the user requests generic synthesizable output, every Xilinx UNISIM primitive instantiation must be replaced with a **functionally equivalent, timing-identical** generic SystemVerilog implementation. See `references/conversion-rules.md` section "Vendor/UNISIM Primitive Substitution" for detailed rules.
 
-Key substitution rules:
-
-| Xilinx Primitive | Generic SV Equivalent |
-|:---|:---|
-| `LUT1`/`LUT2`/`LUT3`/`LUT4`/`LUT5`/`LUT6` | `always_comb` case statement using the LUT init value as a truth table |
-| `SRL16E` | `always_ff @(posedge clk)` shift register with addressable output |
-| `FD`/`FDE`/`FDRE`/`FDSE`/`FDRSE` | `always_ff @(posedge clk)` with appropriate reset/enable |
-| `MUXCY` | `assign o = s ? ci : di;` (carry-chain mux) |
-| `XORCY` | `assign o = a ^ b;` |
-| `MULT_AND` | `assign o = a & b;` |
-| `CARRY4` | Behavioral carry chain or `assign {co, o} = a + b + ci;` |
-| `DSP48E1`/`DSP48E2` | Parameterized multiplier+adder module or behavioral `a*b + c` |
-| `BUFG`/`BUFH` | `assign o = i;` (clock buffer passthrough) |
-| `RAMB18E1`/`RAMB36E1` | Generic inferred BRAM with `always_ff` read/write |
-| `IBUF`/`OBUF`/`IOBUF` | `assign` passthrough or tri-state buffer |
-
-Rules:
-- Do NOT instantiate UNISIM primitives in generated SV output.
-- Do NOT emit `library unisim;` or `import unisim::*;` in generated SV.
-- Each substitution must include a `// VHDL2SV:` Chinese comment identifying the original primitive.
-- For complex primitives (DSP48, block RAM), use behavioral descriptions that inference tools can recognize.
-- Flag any primitive that cannot be cleanly converted as a Manual Review Item.
+核心要求：
+- **功能等价**：相同输入产生相同输出（bit-exact），相同周期精确时序（cycle-accurate latency）
+- **逻辑时序相同**：保留原始复位/使能行为、流水线级数、数据路径宽度
+- 每个替换必须添加 `// VHDL2SV:` 中文注释标明原始原语名称
+- 不得在输出中保留 `library UNISIM;` 或供应商原语实例化
+- 无法确认功能等价时标志为 Manual Review Item，不得猜测替换
+- **供应商原语替换是本 skill "严禁行为级简化转换"P0 规则的例外**：允许在保证功能等价和时序相同的前提下生成结构级通用逻辑，不要求逐门复制原始原语内部 netlist
 
 Procedure rules:
 - Do not generate SV `task` for synthesizable RTL by default.
@@ -202,6 +187,7 @@ Validation rules:
 - Do not use positional associations when named parameter or port connections are possible.
 - Do not emit `input var`, `output var`, or `inout var` on synthesizable module ports. Treat simulator warnings about defaulting user-defined typed inputs to `var` as a compatibility note, not as permission to add `var`; prefer plain typed ports or explicit flattening/wrappers.
 - Do not clutter generated RTL with obvious comments. Use Chinese `// VHDL2SV:` comments only for high-risk migration decisions; put broader assumptions and risks in the response notes.
+- **严禁行为级简化转换（STRICTLY FORBIDDEN — P0 最高优先级）**: 禁止将 VHDL 结构型 RTL 转换为行为级 SystemVerilog。每一个 VHDL process/generate/instance/signal 必须精确映射到对应的 SV 结构。具体而言：禁止用一行 `assign` 或 `$clog2` 替代多级进位链/MUX树；禁止用行为级 `<<`/`>>` 替代参数化 barrel shifter 的逐级 MUX 展开；禁止省略流水线寄存器或将多周期流水线压缩为组合逻辑；禁止将 `REGISTERS`/`flt_pt_reg_type` 参数化的可配置流水线简化为固定延迟。转换结果必须保持原始 VHDL 的：① 周期精确时序（cycle-accurate latency）② 结构等价（structural equivalence）③ 综合结果可比（comparable synthesis result）。转换后的 SV 模块必须能直接替换原始 VHDL 实例，不需要修改任何上层模块的例化代码。**例外**：供应商原语替换（Vendor Primitive Substitution）允许在保证功能等价和时序相同的前提下生成通用逻辑，详见 `references/conversion-rules.md`。This is a P0 mandatory rule — violations invalidate the conversion regardless of simulation pass/fail.
 - Do not claim Efinity synthesis success, Questa simulation success, or functional equivalence unless those external checks were actually run by the user or in a separate requested workflow. Questa `vlog -sv` syntax compile success may only be reported as compile/syntax success, not simulation success.
 
 ## 杈撳嚭鏍煎紡 / Output Format
